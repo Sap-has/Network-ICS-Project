@@ -114,5 +114,5 @@
 
 ### Validation Criteria
 - False positive rate: < 5% on validation set
-- Coverage: baseline captures \u2265 95% of normal behavior
+- Coverage: baseline captures >= 95% of normal behavior
 - Stability: metrics consistent across collection period
