@@ -4,6 +4,7 @@ from typing import List, Dict, Optional
 from .modbus_parser import ModbusParser, ModbusPacket, decode_function_code
 from .entropy_calculator import EntropyCalculator, calculate_entropy_statistics
 
+
 class ModbusFeatureExtractor:    
     def __init__(self, parser: ModbusParser):
         self.parser = parser
@@ -16,28 +17,19 @@ class ModbusFeatureExtractor:
         
         for pkt in self.packets:
             feature_dict = {
-                # Temporal features
                 'timestamp': pkt.timestamp,
-                
-                # Network features
                 'src_ip': pkt.src_ip,
                 'dst_ip': pkt.dst_ip,
                 'src_port': pkt.src_port,
                 'dst_port': pkt.dst_port,
-                
-                # Modbus header features
                 'transaction_id': pkt.transaction_id,
                 'protocol_id': pkt.protocol_id,
                 'unit_id': pkt.unit_id,
                 'function_code': pkt.function_code,
                 'function_name': decode_function_code(pkt.function_code) if pkt.function_code else 'Unknown',
-                
-                # Length features
                 'packet_length': len(pkt.raw_data),
                 'modbus_length': pkt.length,
                 'data_length': len(pkt.data) if pkt.data else 0,
-                
-                # Validity
                 'is_valid': pkt.is_valid()
             }
             
@@ -52,7 +44,6 @@ class ModbusFeatureExtractor:
         
         df = self.features_df.copy()
         
-        # Calculate entropy for each packet
         payload_entropies = []
         header_entropies = []
         full_packet_entropies = []
@@ -60,34 +51,27 @@ class ModbusFeatureExtractor:
         is_normal_entropy = []
         
         for pkt in self.packets:
-            # Payload entropy (data field only)
             payload_entropy = self.entropy_calc.calculate_payload_entropy(pkt.data)
             payload_entropies.append(payload_entropy)
             
-            # Header entropy (MBAP header)
             header_entropy = self.entropy_calc.calculate_header_entropy(pkt.raw_data)
             header_entropies.append(header_entropy)
             
-            # Full packet entropy
             full_entropy = self.entropy_calc.calculate_full_packet_entropy(pkt.raw_data)
             full_packet_entropies.append(full_entropy)
             
-            # Classification
             classification = self.entropy_calc.classify_entropy(payload_entropy)
             entropy_classifications.append(classification)
             
-            # Check if within normal range (3.5-6.5 bits for payload)
             is_normal = self.entropy_calc.is_entropy_normal(payload_entropy)
             is_normal_entropy.append(is_normal)
         
-        # Add entropy features to dataframe
         df['payload_entropy'] = payload_entropies
         df['header_entropy'] = header_entropies
         df['full_packet_entropy'] = full_packet_entropies
         df['entropy_classification'] = entropy_classifications
         df['is_normal_entropy'] = is_normal_entropy
         
-        # Rolling entropy statistics (window of 10 packets)
         df['payload_entropy_mean_10'] = df['payload_entropy'].rolling(window=10, min_periods=1).mean()
         df['payload_entropy_std_10'] = df['payload_entropy'].rolling(window=10, min_periods=1).std()
         df['payload_entropy_max_10'] = df['payload_entropy'].rolling(window=10, min_periods=1).max()
@@ -95,63 +79,142 @@ class ModbusFeatureExtractor:
         
         return df
     
-    def extract_statistical_features(self) -> pd.DataFrame:
+    def extract_timing_features(self) -> pd.DataFrame:
         if self.features_df is None:
             self.extract_basic_features()
         
         df = self.features_df.copy()
         
-        # Time-based features
         df['time_delta'] = df['timestamp'].diff()
+        df['time_delta_ms'] = df['time_delta'] * 1000
         
-        # Rolling statistics for packet length (window of 10)
+        df['time_delta_mean_10'] = df['time_delta'].rolling(window=10, min_periods=1).mean()
+        df['time_delta_std_10'] = df['time_delta'].rolling(window=10, min_periods=1).std()
+        df['time_delta_min_10'] = df['time_delta'].rolling(window=10, min_periods=1).min()
+        df['time_delta_max_10'] = df['time_delta'].rolling(window=10, min_periods=1).max()
+        
+        df['time_delta_cv_10'] = df['time_delta_std_10'] / (df['time_delta_mean_10'] + 1e-9)
+        
+        df['burst_indicator'] = (df['time_delta_ms'] < 5).astype(int)
+        df['periodicity_score'] = 1 - df['time_delta_cv_10'].fillna(1)
+        
+        return df
+    
+    def extract_packet_size_features(self) -> pd.DataFrame:
+        if self.features_df is None:
+            self.extract_basic_features()
+        
+        df = self.features_df.copy()
+        
         df['packet_length_mean_10'] = df['packet_length'].rolling(window=10, min_periods=1).mean()
         df['packet_length_std_10'] = df['packet_length'].rolling(window=10, min_periods=1).std()
         df['packet_length_max_10'] = df['packet_length'].rolling(window=10, min_periods=1).max()
         df['packet_length_min_10'] = df['packet_length'].rolling(window=10, min_periods=1).min()
         
-        # Rolling statistics for inter-arrival time
-        df['time_delta_mean_10'] = df['time_delta'].rolling(window=10, min_periods=1).mean()
-        df['time_delta_std_10'] = df['time_delta'].rolling(window=10, min_periods=1).std()
-        
-        # Function code frequency in rolling window
-        df['function_code_changes'] = (df['function_code'] != df['function_code'].shift()).astype(int)
+        df['packet_length_cv_10'] = df['packet_length_std_10'] / (df['packet_length_mean_10'] + 1e-9)
         
         return df
     
-    def extract_categorical_features(self) -> pd.DataFrame:
+    def extract_function_code_features(self) -> pd.DataFrame:
         if self.features_df is None:
             self.extract_basic_features()
         
         df = self.features_df.copy()
         
-        # One-hot encode function codes
         function_code_dummies = pd.get_dummies(df['function_code'], prefix='fc')
         df = pd.concat([df, function_code_dummies], axis=1)
         
-        # Binary features
         df['is_read_operation'] = df['function_code'].isin([1, 2, 3, 4]).astype(int)
         df['is_write_operation'] = df['function_code'].isin([5, 6, 15, 16]).astype(int)
         df['is_error_response'] = (df['function_code'] >= 128).astype(int)
         
+        df['function_code_changes'] = (df['function_code'] != df['function_code'].shift()).astype(int)
+        
+        df['function_code_stability_10'] = 1 - df['function_code_changes'].rolling(window=10, min_periods=1).mean()
+        
+        return df
+    
+    def extract_protocol_validation_features(self) -> pd.DataFrame:
+        if self.features_df is None:
+            self.extract_basic_features()
+        
+        df = self.features_df.copy()
+        
+        df['protocol_id_valid'] = (df['protocol_id'] == 0).astype(int)
+        df['unit_id_valid'] = ((df['unit_id'] >= 1) & (df['unit_id'] <= 247)).astype(int)
+        df['function_code_valid'] = ((df['function_code'] >= 1) & (df['function_code'] <= 127)).astype(int)
+        
+        expected_length = df['data_length'] + 2
+        df['length_consistent'] = (df['modbus_length'] == expected_length).astype(int)
+        
+        return df
+    
+    def extract_flow_features(self) -> pd.DataFrame:
+        if self.features_df is None:
+            self.extract_basic_features()
+        
+        df = self.features_df.copy()
+        
+        src_counts = df.groupby('src_ip').size().to_dict()
+        dst_counts = df.groupby('dst_ip').size().to_dict()
+        unit_counts = df.groupby('unit_id').size().to_dict()
+        
+        df['packets_per_src'] = df['src_ip'].map(src_counts)
+        df['packets_per_dst'] = df['dst_ip'].map(dst_counts)
+        df['packets_per_unit'] = df['unit_id'].map(unit_counts)
+        
+        df['unique_src_ips'] = df['src_ip'].nunique()
+        df['unique_dst_ips'] = df['dst_ip'].nunique()
+        df['unique_unit_ids'] = df['unit_id'].nunique()
+        
+        return df
+    
+    def extract_derived_features(self) -> pd.DataFrame:
+        if self.features_df is None:
+            self.extract_basic_features()
+        
+        df = self.features_df.copy()
+        
+        if 'payload_entropy_std_10' in df.columns:
+            df['entropy_stability'] = 1 / (1 + df['payload_entropy_std_10'].fillna(0))
+        
+        if 'is_read_operation' in df.columns and 'is_write_operation' in df.columns:
+            read_total = df['is_read_operation'].sum()
+            write_total = df['is_write_operation'].sum()
+            df['read_write_ratio'] = read_total / max(write_total, 1)
+        
+        if 'time_delta' in df.columns:
+            time_range = df['timestamp'].max() - df['timestamp'].min()
+            df['traffic_intensity'] = len(df) / max(time_range, 1)
+        
         return df
     
     def extract_all_features(self) -> pd.DataFrame:
-        basic_df = self.extract_basic_features()
-        stat_df = self.extract_statistical_features()
-        entropy_df = self.extract_entropy_features()
-        cat_df = self.extract_categorical_features()
+        self.extract_basic_features()
+        df = self.extract_entropy_features()
+        self.features_df = df
+        df = self.extract_timing_features()
+        self.features_df = df
+        df = self.extract_packet_size_features()
+        self.features_df = df
+        df = self.extract_function_code_features()
+        self.features_df = df
+        df = self.extract_protocol_validation_features()
+        self.features_df = df
+        df = self.extract_flow_features()
+        self.features_df = df
+        df = self.extract_derived_features()
         
-        return cat_df
+        self.features_df = df
+        return df
     
     def get_feature_matrix(self, feature_columns: Optional[List[str]] = None) -> np.ndarray:
         if self.features_df is None:
             self.extract_all_features()
         
         if feature_columns is None:
-            # Select only numeric columns, excluding identifiers
             exclude_cols = ['timestamp', 'src_ip', 'dst_ip', 'function_name', 
-                          'entropy_classification']
+                          'entropy_classification', 'src_port', 'dst_port']
             feature_columns = [col for col in self.features_df.columns 
                              if col not in exclude_cols and 
                              pd.api.types.is_numeric_dtype(self.features_df[col])]
@@ -162,33 +225,41 @@ class ModbusFeatureExtractor:
         if self.features_df is None:
             self.extract_basic_features()
         
-        # Extract entropy features if not already done
         if 'payload_entropy' not in self.features_df.columns:
             self.extract_entropy_features()
+        
+        if 'time_delta' not in self.features_df.columns:
+            self.extract_timing_features()
         
         stats = {
             'total_packets': len(self.packets),
             'unique_function_codes': self.features_df['function_code'].nunique(),
             'function_code_distribution': self.features_df['function_code'].value_counts().to_dict(),
             
-            # Packet length statistics
-            'packet_length_mean': float(self.features_df['packet_length'].mean()),
-            'packet_length_std': float(self.features_df['packet_length'].std()),
-            'packet_length_min': int(self.features_df['packet_length'].min()),
-            'packet_length_max': int(self.features_df['packet_length'].max()),
-            'packet_length_median': float(self.features_df['packet_length'].median()),
+            'packet_length': {
+                'mean': float(self.features_df['packet_length'].mean()),
+                'std': float(self.features_df['packet_length'].std()),
+                'min': int(self.features_df['packet_length'].min()),
+                'max': int(self.features_df['packet_length'].max()),
+                'median': float(self.features_df['packet_length'].median()),
+                'cv': float(self.features_df['packet_length'].std() / self.features_df['packet_length'].mean())
+            },
             
-            # Timing statistics
-            'time_delta_mean_ms': float(self.features_df['time_delta'].mean() * 1000) if len(self.features_df) > 1 else 0,
-            'time_delta_std_ms': float(self.features_df['time_delta'].std() * 1000) if len(self.features_df) > 1 else 0,
-            'time_delta_min_ms': float(self.features_df['time_delta'].min() * 1000) if len(self.features_df) > 1 else 0,
-            'time_delta_max_ms': float(self.features_df['time_delta'].max() * 1000) if len(self.features_df) > 1 else 0,
+            'timing': {
+                'mean_ms': float(self.features_df['time_delta'].mean() * 1000) if len(self.features_df) > 1 else 0,
+                'std_ms': float(self.features_df['time_delta'].std() * 1000) if len(self.features_df) > 1 else 0,
+                'min_ms': float(self.features_df['time_delta'].min() * 1000) if len(self.features_df) > 1 else 0,
+                'max_ms': float(self.features_df['time_delta'].max() * 1000) if len(self.features_df) > 1 else 0,
+                'median_ms': float(self.features_df['time_delta'].median() * 1000) if len(self.features_df) > 1 else 0,
+                'cv': float(self.features_df['time_delta'].std() / self.features_df['time_delta'].mean()) if len(self.features_df) > 1 and self.features_df['time_delta'].mean() > 0 else 0
+            },
             
-            # Network statistics
-            'unique_src_ips': self.features_df['src_ip'].nunique(),
-            'unique_dst_ips': self.features_df['dst_ip'].nunique(),
-            'unique_unit_ids': self.features_df['unit_id'].nunique(),
-            'unit_id_distribution': self.features_df['unit_id'].value_counts().to_dict(),
+            'network': {
+                'unique_src_ips': self.features_df['src_ip'].nunique(),
+                'unique_dst_ips': self.features_df['dst_ip'].nunique(),
+                'unique_unit_ids': self.features_df['unit_id'].nunique(),
+                'unit_id_distribution': self.features_df['unit_id'].value_counts().to_dict(),
+            },
         }
         
         if 'payload_entropy' in self.features_df.columns:
@@ -201,39 +272,24 @@ class ModbusFeatureExtractor:
                 'normal_entropy_percentage': float(self.features_df['is_normal_entropy'].mean() * 100)
             }
         
-        return stats
-    
-    def get_feature_importance_summary(self) -> Dict:
-        if self.features_df is None:
-            self.extract_all_features()
-        
-        summary = {
-            'packet_characteristics': {
-                'mean_size': float(self.features_df['packet_length'].mean()),
-                'size_variability': float(self.features_df['packet_length'].std()),
-            },
-            'timing_characteristics': {
-                'mean_inter_arrival_ms': float(self.features_df['time_delta'].mean() * 1000) if len(self.features_df) > 1 else 0,
-                'timing_regularity': float(self.features_df['time_delta'].std() * 1000) if len(self.features_df) > 1 else 0,
-            },
-            'protocol_usage': {
-                'function_codes': self.features_df['function_code'].value_counts().to_dict(),
-                'read_write_ratio': float(self.features_df['is_read_operation'].sum() / 
-                                        max(self.features_df['is_write_operation'].sum(), 1)),
-            },
-            'entropy_profile': {
-                'mean_payload_entropy': float(self.features_df['payload_entropy'].mean()),
-                'mean_header_entropy': float(self.features_df['header_entropy'].mean()),
-                'entropy_stability': float(self.features_df['payload_entropy'].std()),
-            } if 'payload_entropy' in self.features_df.columns else None,
-            'network_topology': {
-                'unique_sources': self.features_df['src_ip'].nunique(),
-                'unique_destinations': self.features_df['dst_ip'].nunique(),
-                'unique_units': self.features_df['unit_id'].nunique(),
+        if 'is_read_operation' in self.features_df.columns:
+            stats['operations'] = {
+                'read_count': int(self.features_df['is_read_operation'].sum()),
+                'write_count': int(self.features_df['is_write_operation'].sum()),
+                'error_count': int(self.features_df['is_error_response'].sum()),
+                'read_percentage': float(self.features_df['is_read_operation'].mean() * 100),
+                'write_percentage': float(self.features_df['is_write_operation'].mean() * 100),
+                'error_percentage': float(self.features_df['is_error_response'].mean() * 100)
             }
-        }
         
-        return summary
+        if 'is_valid' in self.features_df.columns:
+            stats['protocol_compliance'] = {
+                'valid_packets': int(self.features_df['is_valid'].sum()),
+                'invalid_packets': int((~self.features_df['is_valid']).sum()),
+                'validity_rate': float(self.features_df['is_valid'].mean() * 100)
+            }
+        
+        return stats
     
     def save_features(self, output_file: str, format: str = 'csv'):
         if self.features_df is None:
@@ -252,7 +308,6 @@ class ModbusFeatureExtractor:
 
 
 def extract_features_from_pcap(pcap_file: str, output_file: Optional[str] = None) -> pd.DataFrame:
-    # Parse packets
     print(f"\n{'='*60}")
     print(f"Processing: {pcap_file}")
     print(f"{'='*60}")
@@ -264,11 +319,9 @@ def extract_features_from_pcap(pcap_file: str, output_file: Optional[str] = None
         print("WARNING: No valid Modbus packets found!")
         return pd.DataFrame()
     
-    # Extract features
     extractor = ModbusFeatureExtractor(parser)
     features_df = extractor.extract_all_features()
     
-    # Print summary
     print("\n=== FEATURE EXTRACTION SUMMARY ===")
     stats = extractor.get_summary_statistics()
     
@@ -277,13 +330,16 @@ def extract_features_from_pcap(pcap_file: str, output_file: Optional[str] = None
     print(f"  Unique function codes: {stats['unique_function_codes']}")
     
     print(f"\nPacket Length:")
-    print(f"  Mean: {stats['packet_length_mean']:.2f} bytes")
-    print(f"  Std: {stats['packet_length_std']:.2f} bytes")
-    print(f"  Range: {stats['packet_length_min']}-{stats['packet_length_max']} bytes")
+    print(f"  Mean: {stats['packet_length']['mean']:.2f} bytes")
+    print(f"  Std: {stats['packet_length']['std']:.2f} bytes")
+    print(f"  Range: {stats['packet_length']['min']}-{stats['packet_length']['max']} bytes")
+    print(f"  CV: {stats['packet_length']['cv']:.3f}")
     
     print(f"\nTiming:")
-    print(f"  Mean inter-arrival: {stats['time_delta_mean_ms']:.2f} ms")
-    print(f"  Std inter-arrival: {stats['time_delta_std_ms']:.2f} ms")
+    print(f"  Mean inter-arrival: {stats['timing']['mean_ms']:.2f} ms")
+    print(f"  Std inter-arrival: {stats['timing']['std_ms']:.2f} ms")
+    print(f"  Range: {stats['timing']['min_ms']:.2f}-{stats['timing']['max_ms']:.2f} ms")
+    print(f"  CV: {stats['timing']['cv']:.3f}")
     
     if 'entropy' in stats:
         print(f"\nEntropy Analysis:")
@@ -299,12 +355,22 @@ def extract_features_from_pcap(pcap_file: str, output_file: Optional[str] = None
         percentage = (count / stats['total_packets']) * 100
         print(f"  FC {fc} ({fc_name}): {count} ({percentage:.1f}%)")
     
-    print(f"\nNetwork:")
-    print(f"  Unique source IPs: {stats['unique_src_ips']}")
-    print(f"  Unique destination IPs: {stats['unique_dst_ips']}")
-    print(f"  Unique unit IDs: {stats['unique_unit_ids']}")
+    if 'operations' in stats:
+        print(f"\nOperations:")
+        print(f"  Read operations: {stats['operations']['read_count']} ({stats['operations']['read_percentage']:.1f}%)")
+        print(f"  Write operations: {stats['operations']['write_count']} ({stats['operations']['write_percentage']:.1f}%)")
+        print(f"  Error responses: {stats['operations']['error_count']} ({stats['operations']['error_percentage']:.1f}%)")
     
-    # Save if output file specified
+    print(f"\nNetwork:")
+    print(f"  Unique source IPs: {stats['network']['unique_src_ips']}")
+    print(f"  Unique destination IPs: {stats['network']['unique_dst_ips']}")
+    print(f"  Unique unit IDs: {stats['network']['unique_unit_ids']}")
+    
+    if 'protocol_compliance' in stats:
+        print(f"\nProtocol Compliance:")
+        print(f"  Valid packets: {stats['protocol_compliance']['valid_packets']} ({stats['protocol_compliance']['validity_rate']:.1f}%)")
+        print(f"  Invalid packets: {stats['protocol_compliance']['invalid_packets']}")
+    
     if output_file:
         extractor.save_features(output_file)
     
