@@ -35,7 +35,13 @@ class ModbusFeatureExtractor:
             
             features.append(feature_dict)
         
-        self.features_df = pd.DataFrame(features)
+        required_columns = [
+            'timestamp', 'src_ip', 'dst_ip', 'src_port', 'dst_port',
+            'transaction_id', 'protocol_id', 'unit_id', 'function_code',
+            'function_name', 'packet_length', 'modbus_length', 'data_length', 'is_valid'
+        ]
+        
+        self.features_df = pd.DataFrame(features, columns=required_columns)
         return self.features_df
     
     def extract_entropy_features(self) -> pd.DataFrame:
@@ -94,6 +100,8 @@ class ModbusFeatureExtractor:
         df['time_delta_max_10'] = df['time_delta'].rolling(window=10, min_periods=1).max()
         
         df['time_delta_cv_10'] = df['time_delta_std_10'] / (df['time_delta_mean_10'] + 1e-9)
+
+        df['time_delta_cv_10'] = df['time_delta_cv_10'].fillna(0)
         
         df['burst_indicator'] = (df['time_delta_ms'] < 5).astype(int)
         df['periodicity_score'] = 1 - df['time_delta_cv_10'].fillna(1)
@@ -112,6 +120,8 @@ class ModbusFeatureExtractor:
         df['packet_length_min_10'] = df['packet_length'].rolling(window=10, min_periods=1).min()
         
         df['packet_length_cv_10'] = df['packet_length_std_10'] / (df['packet_length_mean_10'] + 1e-9)
+
+        df['packet_length_cv_10'] = df['packet_length_cv_10'].fillna(0)
         
         return df
     
@@ -214,7 +224,8 @@ class ModbusFeatureExtractor:
         
         if feature_columns is None:
             exclude_cols = ['timestamp', 'src_ip', 'dst_ip', 'function_name', 
-                          'entropy_classification', 'src_port', 'dst_port']
+                          'entropy_classification', 'src_port', 'dst_port', 
+                          'is_normal_entropy']
             feature_columns = [col for col in self.features_df.columns 
                              if col not in exclude_cols and 
                              pd.api.types.is_numeric_dtype(self.features_df[col])]
@@ -224,6 +235,39 @@ class ModbusFeatureExtractor:
     def get_summary_statistics(self) -> Dict:
         if self.features_df is None:
             self.extract_basic_features()
+
+        if self.features_df.empty:
+            return {
+                'total_packets': 0,
+                'unique_function_codes': 0,
+                'function_code_distribution': {},
+                
+                'packet_length': {
+                    'mean': 0.0, 'std': 0.0, 'min': 0, 'max': 0, 'median': 0.0, 'cv': 0.0
+                },
+                
+                'timing': {
+                    'mean_ms': 0.0, 'std_ms': 0.0, 'min_ms': 0.0, 'max_ms': 0.0, 'median_ms': 0.0, 'cv': 0.0
+                },
+                
+                'network': {
+                    'unique_src_ips': 0, 'unique_dst_ips': 0, 'unique_unit_ids': 0, 'unit_id_distribution': {},
+                },
+                
+                # Default entropy, operations, and protocol_compliance if features weren't extracted
+                'entropy': {
+                    'payload': calculate_entropy_statistics([]), # Returns all 0.0
+                    'header': calculate_entropy_statistics([]), # Returns all 0.0
+                    'normal_entropy_percentage': 0.0
+                },
+                'operations': {
+                    'read_count': 0, 'write_count': 0, 'error_count': 0,
+                    'read_percentage': 0.0, 'write_percentage': 0.0, 'error_percentage': 0.0
+                },
+                'protocol_compliance': {
+                    'valid_packets': 0, 'invalid_packets': 0, 'validity_rate': 0.0
+                }
+            }
         
         if 'payload_entropy' not in self.features_df.columns:
             self.extract_entropy_features()
