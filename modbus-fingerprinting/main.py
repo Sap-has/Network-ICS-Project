@@ -6,7 +6,7 @@ import os
 PCAP_FILE = 'modbus-fingerprinting/data/raw/MODBUS/Modbus/Modbus.pcap'
 
 # 2. Define an optional output file for the extracted features
-OUTPUT_CSV = 'modbus-fingerprinting/modbus_features.csv'
+OUTPUT_CSV = 'modbus-fingerprinting/csv_outputs/modbus_features.csv'
 
 if __name__ == '__main__':
     if not os.path.exists(PCAP_FILE):
