@@ -137,17 +137,13 @@ def group_and_compute_stats(df, group_cols=('src_ip', 'dst_ip', 'unit_id'), feat
     # Convert index to columns for easier consumption
     agg_df = agg_df.reset_index()
     # Export to CSV, try to do it to folder
-    csv_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'csv_outputs')
-    os.makedirs(csv_dir, exist_ok=True)
-    
+        
     # Export summary stats
-    csv_path = os.path.join(csv_dir, 'fingerprint_summary.csv')
-    agg_df.to_csv(csv_path, index=False)
+    agg_df.to_csv("fingerprint_summary.csv", index=False)
     print('csv')
     
     # Export frequency distributions
-    json_path = os.path.join(csv_dir, 'freq_distributions.json')
-    with open(json_path, 'w') as f:
+    with open('freq_distributions.json', 'w') as f:
         json.dump(freq_dists, f, indent=2)
     print('json')
 
