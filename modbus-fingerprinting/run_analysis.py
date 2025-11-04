@@ -2,7 +2,7 @@ import os
 import pandas as pd
 from src.extraction.feature_extracter import extract_features_from_pcap
 from src.analysis.visualizer import ModbusAnalysisTool
-from src.analysis.anomaly_detector import group_and_compute_stats
+from src.analysis.anomaly_detector import ModbusAnomalyDetector, group_and_compute_stats
 
 def process_pcap_file(pcap_path, output_dir):
     """Process a single PCAP file and generate analysis results"""
@@ -18,19 +18,23 @@ def process_pcap_file(pcap_path, output_dir):
     if features_df is None or features_df.empty:
         print(f"No features extracted from {pcap_path}")
         return
-    
-    # 2. Create visualizations and analysis report
-    analyzer = ModbusAnalysisTool(features_df)
+        
+    # 2. Create visualizations and analysis report (assuming ModbusAnalysisTool still exists)
+    analyzer = ModbusAnalysisTool(features_df) 
     analyzer.export_analysis_results(pcap_output_dir)
     
-    # 3. Run anomaly detection
-    summary_df, freq_dists = group_and_compute_stats(features_df)
+    # 3. Run anomaly detection with the new detector
+    summary_df, freq_dists = group_and_compute_stats(features_df) # Keep for summary stats
+    
+    # Instantiate and run the new anomaly detector
+    detector = ModbusAnomalyDetector(features_df)
+    anomalies = detector.detect_anomalies() # <--- New method call
     
     # Save anomaly detection results
-    anomalies = analyzer.detect_potential_anomalies()
     if anomalies:
         import json
         with open(os.path.join(pcap_output_dir, 'anomalies.json'), 'w') as f:
+            # Save the list of anomalous packets and their reasons
             json.dump(anomalies, f, indent=2)
     
     print(f"Analysis completed for {pcap_path}")
