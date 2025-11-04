@@ -1,48 +1,12 @@
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional
-from .modbus_parser import ModbusParser, ModbusPacket
+from .dnp3_parser import DNP3Parser, DNP3Packet, decode_function_code
 from .entropy_calculator import EntropyCalculator, calculate_entropy_statistics
 
 
-# Minimal DNP3 function code mapping (keeps things generic / best-effort).
-# This mapping is intentionally small — feature extractor will still work
-# if unknown codes appear (they'll be labeled as "Unknown Function Code").
-DNP3_FUNCTION_CODES = {
-    0: "CONFIRM",
-    1: "READ",
-    2: "WRITE",
-    3: "SELECT",
-    4: "OPERATE",
-    5: "DIRECT_OPERATE",
-    6: "DIRECT_OPERATE_NO_ACK",
-    7: "FREEZE",
-    8: "FREEZE_NO_ACK",
-}
-
-
-def decode_dnp3_function_code(code: int) -> str:
-    if code in DNP3_FUNCTION_CODES:
-        return DNP3_FUNCTION_CODES[code]
-    else:
-        return f"Unknown Function Code: {code}"
-# (no extra imports)
-
-
 class DNP3FeatureExtractor:
-    """Feature extractor for DNP3 packets.
-
-    The extractor intentionally keeps the same column names and API as
-    the Modbus extractor so downstream analysis code can consume the
-    produced CSVs without change. If a parser specific to DNP3 is used
-    it should provide packet objects with comparable attributes (timestamp,
-    src_ip, dst_ip, src_port, dst_port, raw_data, etc.).
-    """
-
-    def __init__(self, parser: ModbusParser):
-        # Parser type is kept generic for compatibility with existing
-        # parser implementations in the repo. We expect parser.packets
-        # to be iterable of packets with attributes used below.
+    def __init__(self, parser: DNP3Parser):
         self.parser = parser
         self.packets = parser.packets
         self.features_df: Optional[pd.DataFrame] = None
@@ -62,28 +26,15 @@ class DNP3FeatureExtractor:
                 'protocol_id': pkt.protocol_id,
                 'unit_id': pkt.unit_id,
                 'function_code': pkt.function_code,
-                # For DNP3 we attempt to decode the application/function code
-                # from the same field name if present. If the parser exposes a
-                # different attribute name for the DNP3 function code, the
-                # parser should populate `function_code` for compatibility.
-                'function_name': decode_dnp3_function_code(pkt.function_code) if pkt.function_code is not None else 'Unknown',
+                'function_name': decode_function_code(pkt.function_code) if pkt.function_code is not None else 'Unknown',
                 'packet_length': len(pkt.raw_data),
-                # Keep the original column name for compatibility with
-                # downstream consumers.
                 'modbus_length': getattr(pkt, 'length', None),
                 'data_length': len(pkt.data) if pkt.data else 0,
                 'is_valid': pkt.is_valid()
             }
-            
             features.append(feature_dict)
         
-        required_columns = [
-            'timestamp', 'src_ip', 'dst_ip', 'src_port', 'dst_port',
-            'transaction_id', 'protocol_id', 'unit_id', 'function_code',
-            'function_name', 'packet_length', 'modbus_length', 'data_length', 'is_valid'
-        ]
-        
-        self.features_df = pd.DataFrame(features, columns=required_columns)
+        self.features_df = pd.DataFrame(features)
         return self.features_df
     
     def extract_entropy_features(self) -> pd.DataFrame:
@@ -142,7 +93,6 @@ class DNP3FeatureExtractor:
         df['time_delta_max_10'] = df['time_delta'].rolling(window=10, min_periods=1).max()
         
         df['time_delta_cv_10'] = df['time_delta_std_10'] / (df['time_delta_mean_10'] + 1e-9)
-
         df['time_delta_cv_10'] = df['time_delta_cv_10'].fillna(0)
         
         df['burst_indicator'] = (df['time_delta_ms'] < 5).astype(int)
@@ -162,7 +112,6 @@ class DNP3FeatureExtractor:
         df['packet_length_min_10'] = df['packet_length'].rolling(window=10, min_periods=1).min()
         
         df['packet_length_cv_10'] = df['packet_length_std_10'] / (df['packet_length_mean_10'] + 1e-9)
-
         df['packet_length_cv_10'] = df['packet_length_cv_10'].fillna(0)
         
         return df
@@ -175,16 +124,12 @@ class DNP3FeatureExtractor:
         
         function_code_dummies = pd.get_dummies(df['function_code'], prefix='fc')
         df = pd.concat([df, function_code_dummies], axis=1)
-        # DNP3 read/write categorization is more coarse; we map common
-        # application-level codes to read/write flags where possible.
+        
         df['is_read_operation'] = df['function_code'].isin([1]).astype(int)
         df['is_write_operation'] = df['function_code'].isin([2, 4, 5]).astype(int)
-        # DNP3 doesn't use the Modbus 128+ error coding; flag uncommon codes
-        # above 127 as potential error-like responses.
         df['is_error_response'] = (df['function_code'] >= 128).astype(int)
         
         df['function_code_changes'] = (df['function_code'] != df['function_code'].shift()).astype(int)
-        
         df['function_code_stability_10'] = 1 - df['function_code_changes'].rolling(window=10, min_periods=1).mean()
         
         return df
@@ -195,21 +140,14 @@ class DNP3FeatureExtractor:
         
         df = self.features_df.copy()
         
-        # Basic sanity checks adapted for DNP3-style packets. The parser
-        # may not populate protocol_id/unit_id for DNP3 — tolerate missing
-        # fields but keep the columns so downstream code sees a consistent
-        # schema.
-        df['protocol_id_valid'] = df['protocol_id'].apply(lambda x: 1 if x == 0 else 0) if 'protocol_id' in df.columns else 0
-        df['unit_id_valid'] = df['unit_id'].apply(lambda x: 1 if (x is not None and x >= 0) else 0) if 'unit_id' in df.columns else 0
+        df['protocol_id_valid'] = df['protocol_id'].apply(lambda x: 1 if x == 0 else 0)
+        df['unit_id_valid'] = df['unit_id'].apply(lambda x: 1 if (x is not None and x >= 0) else 0)
         df['function_code_valid'] = df['function_code'].apply(lambda x: 1 if (x is not None and 0 <= x <= 255) else 0)
-
-        # Length consistency for DNP3 is parser-dependent; provide a best-effort
-        # check when lengths are present.
+        
         if 'modbus_length' in df.columns and 'data_length' in df.columns:
-            expected_length = df['data_length'] + 2
-            df['length_consistent'] = (df['modbus_length'] == expected_length).astype(int)
+            df['length_consistent'] = ((df['modbus_length'] - df['data_length']).abs() <= 5).astype(int)
         else:
-            df['length_consistent'] = 0
+            df['length_consistent'] = 1
         
         return df
     
@@ -218,18 +156,19 @@ class DNP3FeatureExtractor:
             self.extract_basic_features()
         
         df = self.features_df.copy()
+        
         src_counts = df.groupby('src_ip').size().to_dict()
         dst_counts = df.groupby('dst_ip').size().to_dict()
-        unit_counts = df.groupby('unit_id').size().to_dict() if 'unit_id' in df.columns else {}
-
+        unit_counts = df.groupby('unit_id').size().to_dict()
+        
         df['packets_per_src'] = df['src_ip'].map(src_counts)
         df['packets_per_dst'] = df['dst_ip'].map(dst_counts)
         df['packets_per_unit'] = df['unit_id'].map(unit_counts)
-
+        
         df['unique_src_ips'] = df['src_ip'].nunique()
         df['unique_dst_ips'] = df['dst_ip'].nunique()
-        df['unique_unit_ids'] = df['unit_id'].nunique() if 'unit_id' in df.columns else 0
-
+        df['unique_unit_ids'] = df['unit_id'].nunique()
+        
         return df
     
     def extract_derived_features(self) -> pd.DataFrame:
@@ -267,7 +206,6 @@ class DNP3FeatureExtractor:
         df = self.extract_flow_features()
         self.features_df = df
         df = self.extract_derived_features()
-
         self.features_df = df
         return df
     
@@ -276,9 +214,9 @@ class DNP3FeatureExtractor:
             self.extract_all_features()
         
         if feature_columns is None:
-            exclude_cols = ['timestamp', 'src_ip', 'dst_ip', 'function_name', 
+            exclude_cols = {'timestamp', 'src_ip', 'dst_ip', 'function_name', 
                           'entropy_classification', 'src_port', 'dst_port', 
-                          'is_normal_entropy']
+                          'is_normal_entropy'}
             feature_columns = [col for col in self.features_df.columns 
                              if col not in exclude_cols and 
                              pd.api.types.is_numeric_dtype(self.features_df[col])]
@@ -288,38 +226,18 @@ class DNP3FeatureExtractor:
     def get_summary_statistics(self) -> Dict:
         if self.features_df is None:
             self.extract_basic_features()
-
+        
         if self.features_df.empty:
             return {
                 'total_packets': 0,
                 'unique_function_codes': 0,
                 'function_code_distribution': {},
-                
-                'packet_length': {
-                    'mean': 0.0, 'std': 0.0, 'min': 0, 'max': 0, 'median': 0.0, 'cv': 0.0
-                },
-                
-                'timing': {
-                    'mean_ms': 0.0, 'std_ms': 0.0, 'min_ms': 0.0, 'max_ms': 0.0, 'median_ms': 0.0, 'cv': 0.0
-                },
-                
-                'network': {
-                    'unique_src_ips': 0, 'unique_dst_ips': 0, 'unique_unit_ids': 0, 'unit_id_distribution': {},
-                },
-                
-                # Default entropy, operations, and protocol_compliance if features weren't extracted
-                'entropy': {
-                    'payload': calculate_entropy_statistics([]), # Returns all 0.0
-                    'header': calculate_entropy_statistics([]), # Returns all 0.0
-                    'normal_entropy_percentage': 0.0
-                },
-                'operations': {
-                    'read_count': 0, 'write_count': 0, 'error_count': 0,
-                    'read_percentage': 0.0, 'write_percentage': 0.0, 'error_percentage': 0.0
-                },
-                'protocol_compliance': {
-                    'valid_packets': 0, 'invalid_packets': 0, 'validity_rate': 0.0
-                }
+                'packet_length': {'mean': 0.0, 'std': 0.0, 'min': 0, 'max': 0, 'median': 0.0, 'cv': 0.0},
+                'timing': {'mean_ms': 0.0, 'std_ms': 0.0, 'min_ms': 0.0, 'max_ms': 0.0, 'median_ms': 0.0, 'cv': 0.0},
+                'network': {'unique_src_ips': 0, 'unique_dst_ips': 0, 'unique_unit_ids': 0, 'unit_id_distribution': {}},
+                'entropy': {'payload': calculate_entropy_statistics([]), 'header': calculate_entropy_statistics([]), 'normal_entropy_percentage': 0.0},
+                'operations': {'read_count': 0, 'write_count': 0, 'error_count': 0, 'read_percentage': 0.0, 'write_percentage': 0.0, 'error_percentage': 0.0},
+                'protocol_compliance': {'valid_packets': 0, 'invalid_packets': 0, 'validity_rate': 0.0}
             }
         
         if 'payload_entropy' not in self.features_df.columns:
@@ -404,29 +322,18 @@ class DNP3FeatureExtractor:
         print(f"Features saved to {output_file}")
 
 
-# Compatibility alias: keep the same class name used in other modules/tests
-# so that importing ModbusFeatureExtractor from this package still works.
-ModbusFeatureExtractor = DNP3FeatureExtractor
-
-
 def extract_features_from_pcap(pcap_file: str, output_file: Optional[str] = None) -> pd.DataFrame:
     print(f"\n{'='*60}")
-    print(f"Processing: {pcap_file}")
+    print(f"Processing DNP3 PCAP: {pcap_file}")
     print(f"{'='*60}")
     
-    # Use the available parser implementation in this package. For a true
-    # DNP3-aware implementation a DNP3-specific parser should be supplied
-    # here; the current repository includes a generic parser that extracts
-    # raw TCP payloads which the feature extractor will process.
-    parser = ModbusParser(pcap_file)
+    parser = DNP3Parser(pcap_file)
     parser.parse()
     
     if parser.get_packet_count() == 0:
-        print("WARNING: No valid Modbus packets found!")
+        print("WARNING: No valid DNP3 packets found!")
         return pd.DataFrame()
     
-    # Create a DNP3 feature extractor but keep a compatibility alias so
-    # other modules that import ModbusFeatureExtractor still work.
     extractor = DNP3FeatureExtractor(parser)
     features_df = extractor.extract_all_features()
     
@@ -441,43 +348,20 @@ def extract_features_from_pcap(pcap_file: str, output_file: Optional[str] = None
     print(f"  Mean: {stats['packet_length']['mean']:.2f} bytes")
     print(f"  Std: {stats['packet_length']['std']:.2f} bytes")
     print(f"  Range: {stats['packet_length']['min']}-{stats['packet_length']['max']} bytes")
-    print(f"  CV: {stats['packet_length']['cv']:.3f}")
     
     print(f"\nTiming:")
     print(f"  Mean inter-arrival: {stats['timing']['mean_ms']:.2f} ms")
-    print(f"  Std inter-arrival: {stats['timing']['std_ms']:.2f} ms")
-    print(f"  Range: {stats['timing']['min_ms']:.2f}-{stats['timing']['max_ms']:.2f} ms")
-    print(f"  CV: {stats['timing']['cv']:.3f}")
     
     if 'entropy' in stats:
         print(f"\nEntropy Analysis:")
         print(f"  Payload entropy mean: {stats['entropy']['payload']['mean']:.4f} bits")
-        print(f"  Payload entropy std: {stats['entropy']['payload']['std']:.4f} bits")
-        print(f"  Payload entropy range: {stats['entropy']['payload']['min']:.4f}-{stats['entropy']['payload']['max']:.4f} bits")
         print(f"  Normal entropy packets: {stats['entropy']['normal_entropy_percentage']:.1f}%")
-        print(f"  Header entropy mean: {stats['entropy']['header']['mean']:.4f} bits")
     
     print(f"\nFunction Code Distribution:")
     for fc, count in sorted(stats['function_code_distribution'].items()):
-        fc_name = decode_dnp3_function_code(fc)
+        fc_name = decode_function_code(fc)
         percentage = (count / stats['total_packets']) * 100
         print(f"  FC {fc} ({fc_name}): {count} ({percentage:.1f}%)")
-    
-    if 'operations' in stats:
-        print(f"\nOperations:")
-        print(f"  Read operations: {stats['operations']['read_count']} ({stats['operations']['read_percentage']:.1f}%)")
-        print(f"  Write operations: {stats['operations']['write_count']} ({stats['operations']['write_percentage']:.1f}%)")
-        print(f"  Error responses: {stats['operations']['error_count']} ({stats['operations']['error_percentage']:.1f}%)")
-    
-    print(f"\nNetwork:")
-    print(f"  Unique source IPs: {stats['network']['unique_src_ips']}")
-    print(f"  Unique destination IPs: {stats['network']['unique_dst_ips']}")
-    print(f"  Unique unit IDs: {stats['network']['unique_unit_ids']}")
-    
-    if 'protocol_compliance' in stats:
-        print(f"\nProtocol Compliance:")
-        print(f"  Valid packets: {stats['protocol_compliance']['valid_packets']} ({stats['protocol_compliance']['validity_rate']:.1f}%)")
-        print(f"  Invalid packets: {stats['protocol_compliance']['invalid_packets']}")
     
     if output_file:
         extractor.save_features(output_file)

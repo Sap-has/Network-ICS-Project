@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 import struct
 
 
-class ModbusPacket:    
+class DNP3Packet:
     def __init__(self, timestamp: float, src_ip: str, dst_ip: str, 
                  src_port: int, dst_port: int, raw_data: bytes):
         self.timestamp = timestamp
@@ -13,7 +13,6 @@ class ModbusPacket:
         self.dst_port = dst_port
         self.raw_data = raw_data
         
-        # Modbus TCP/IP ADU fields
         self.transaction_id: Optional[int] = None
         self.protocol_id: Optional[int] = None
         self.length: Optional[int] = None
@@ -21,40 +20,38 @@ class ModbusPacket:
         self.function_code: Optional[int] = None
         self.data: Optional[bytes] = None
         
-        self._parse_modbus_header()
+        self._parse_dnp3_header()
     
-    def _parse_modbus_header(self):
+    def _parse_dnp3_header(self):
         try:
-            # Modbus TCP header is 7 bytes (MBAP header)
-            # Transaction ID (2 bytes) + Protocol ID (2 bytes) + 
-            # Length (2 bytes) + Unit ID (1 byte)
-            if len(self.raw_data) < 7:
+            if len(self.raw_data) < 10:
                 return
             
-            # Unpack MBAP header (big-endian format)
-            self.transaction_id = struct.unpack('>H', self.raw_data[0:2])[0]
-            self.protocol_id = struct.unpack('>H', self.raw_data[2:4])[0]
-            self.length = struct.unpack('>H', self.raw_data[4:6])[0]
-            self.unit_id = struct.unpack('B', self.raw_data[6:7])[0]
+            if self.raw_data[0:2] != b'\x05\x64':
+                return
             
-            # Function code is the first byte after MBAP header
-            if len(self.raw_data) >= 8:
-                self.function_code = struct.unpack('B', self.raw_data[7:8])[0]
+            self.length = struct.unpack('B', self.raw_data[2:3])[0]
+            control = struct.unpack('B', self.raw_data[3:4])[0]
+            dest = struct.unpack('<H', self.raw_data[4:6])[0]
+            src = struct.unpack('<H', self.raw_data[6:8])[0]
+            
+            self.unit_id = dest
+            self.transaction_id = src
+            self.protocol_id = 0
+            
+            if len(self.raw_data) >= 11:
+                self.function_code = struct.unpack('B', self.raw_data[10:11])[0]
                 
-            # Remaining data (PDU data field)
-            if len(self.raw_data) > 8:
-                self.data = self.raw_data[8:]
+            if len(self.raw_data) > 11:
+                self.data = self.raw_data[11:]
                 
-        except (struct.error, IndexError) as e:
-            # Invalid packet structure
+        except (struct.error, IndexError):
             pass
     
     def is_valid(self) -> bool:
-        # Protocol ID should be 0 for Modbus
-        # Function code should be in valid range (1-127)
-        return (self.protocol_id == 0 and 
+        return (self.raw_data[0:2] == b'\x05\x64' and 
                 self.function_code is not None and 
-                1 <= self.function_code <= 127)
+                0 <= self.function_code <= 255)
     
     def to_dict(self) -> Dict:
         return {
@@ -74,48 +71,41 @@ class ModbusPacket:
         }
 
 
-class ModbusParser:    
-    MODBUS_PORT = 502
+class DNP3Parser:
+    DNP3_PORT = 20000
     
     def __init__(self, pcap_file: str):
         self.pcap_file = pcap_file
-        self.packets: List[ModbusPacket] = []
+        self.packets: List[DNP3Packet] = []
     
-    def parse(self) -> List[ModbusPacket]:
+    def parse(self) -> List[DNP3Packet]:
         print(f"Reading PCAP file: {self.pcap_file}")
         
         try:
-            # Read all packets from PCAP
             pcap_packets = rdpcap(self.pcap_file)
             print(f"Total packets in PCAP: {len(pcap_packets)}")
             
-            modbus_count = 0
+            dnp3_count = 0
             
-            # Filter and parse Modbus TCP packets
             for pkt in pcap_packets:
-                # Check if packet has TCP layer
                 if TCP not in pkt:
                     continue
                 
-                # Check if packet is on Modbus port (502)
                 tcp_layer = pkt[TCP]
-                if tcp_layer.dport != self.MODBUS_PORT and tcp_layer.sport != self.MODBUS_PORT:
+                if tcp_layer.dport != self.DNP3_PORT and tcp_layer.sport != self.DNP3_PORT:
                     continue
                 
-                # Extract IP information
                 if IP in pkt:
                     ip_layer = pkt[IP]
                     src_ip = ip_layer.src
                     dst_ip = ip_layer.dst
                 else:
-                    # Skip packets without IP layer
                     continue
                 
-                # Extract TCP payload (Modbus data)
                 payload = bytes(tcp_layer.payload)
                 
-                if len(payload) > 0:
-                    modbus_pkt = ModbusPacket(
+                if len(payload) > 0 and payload[0:2] == b'\x05\x64':
+                    dnp3_pkt = DNP3Packet(
                         timestamp=float(pkt.time),
                         src_ip=src_ip,
                         dst_ip=dst_ip,
@@ -124,12 +114,11 @@ class ModbusParser:
                         raw_data=payload
                     )
                     
-                    # Only keep valid Modbus packets
-                    if modbus_pkt.is_valid():
-                        self.packets.append(modbus_pkt)
-                        modbus_count += 1
+                    if dnp3_pkt.is_valid():
+                        self.packets.append(dnp3_pkt)
+                        dnp3_count += 1
             
-            print(f"Valid Modbus TCP packets extracted: {modbus_count}")
+            print(f"Valid DNP3 packets extracted: {dnp3_count}")
             return self.packets
             
         except FileNotFoundError:
@@ -145,7 +134,7 @@ class ModbusParser:
     def get_packets_as_dicts(self) -> List[Dict]:
         return [pkt.to_dict() for pkt in self.packets]
     
-    def filter_by_function_code(self, function_code: int) -> List[ModbusPacket]:
+    def filter_by_function_code(self, function_code: int) -> List[DNP3Packet]:
         return [pkt for pkt in self.packets if pkt.function_code == function_code]
     
     def get_unique_function_codes(self) -> List[int]:
@@ -153,24 +142,25 @@ class ModbusParser:
                               if pkt.function_code is not None)))
 
 
-# Function code descriptions for reference
-MODBUS_FUNCTION_CODES = {
-    1: "Read Coils",
-    2: "Read Discrete Inputs",
-    3: "Read Holding Registers",
-    4: "Read Input Registers",
-    5: "Write Single Coil",
-    6: "Write Single Register",
-    15: "Write Multiple Coils",
-    16: "Write Multiple Registers",
-    23: "Read/Write Multiple Registers"
+DNP3_FUNCTION_CODES = {
+    0: "CONFIRM",
+    1: "READ",
+    2: "WRITE",
+    3: "SELECT",
+    4: "OPERATE",
+    5: "DIRECT_OPERATE",
+    6: "DIRECT_OPERATE_NO_ACK",
+    7: "FREEZE",
+    8: "FREEZE_NO_ACK",
+    129: "RESPONSE",
+    130: "UNSOLICITED_RESPONSE"
 }
 
 
 def decode_function_code(code: int) -> str:
-    if code in MODBUS_FUNCTION_CODES:
-        return MODBUS_FUNCTION_CODES[code]
+    if code in DNP3_FUNCTION_CODES:
+        return DNP3_FUNCTION_CODES[code]
     elif code >= 128:
-        return f"Error Response (Exception Code: {code - 128})"
+        return f"Response (Code: {code})"
     else:
         return f"Unknown Function Code: {code}"
