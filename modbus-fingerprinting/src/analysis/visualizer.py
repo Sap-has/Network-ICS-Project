@@ -3,6 +3,7 @@ import seaborn as sns
 import pandas as pd
 from typing import *
 import json
+import os # Import os for directory operations in export_analysis_results
 
 class ModbusAnalysisTool:
     def __init__(self, features_df: pd.DataFrame = None, summary_stats: Dict = None):
@@ -124,6 +125,50 @@ class ModbusAnalysisTool:
             plt.savefig(save_path, dpi = 150, bbox_inches = 'tight')
         return fig
 
+    # --- NEW VISUALIZATION FOR ANOMALY DETECTION ---
+    def plot_anomaly_detection(self, anomalies_report: List[Dict], save_path: str = None) -> plt.Figure:
+        if 'is_anomaly' not in self.df.columns or self.df['is_anomaly'].sum() == 0:
+            print("No anomalies detected or 'is_anomaly' column missing.")
+            return None
+        
+        anomalous_df = self.df[self.df['is_anomaly']]
+        
+        # Determine the number of subplots: 3 if 'time_delta_ms' is present, 2 otherwise.
+        num_plots = 3 if 'time_delta_ms' in self.df.columns else 2
+        fig, axes = plt.subplots(num_plots, 1, figsize=(15, 5 * num_plots), sharex=True)
+        if num_plots == 2:
+            axes = axes.reshape(-1) # Ensure axes is iterable even if it's 2x1
+
+        # 1. Packet Length Plot
+        axes[0].plot(self.df['timestamp'], self.df['packet_length'], 'b-', alpha=0.5, label='All Packets')
+        axes[0].scatter(anomalous_df['timestamp'], anomalous_df['packet_length'], color='red', marker='o', label=f'Anomalies ({len(anomalous_df)})')
+        axes[0].set_title('Packet Length Over Time (Anomalies Highlighted)')
+        axes[0].set_ylabel('Packet Size (bytes)')
+        axes[0].legend()
+        
+        # 2. Payload Entropy Plot
+        axes[1].plot(self.df['timestamp'], self.df['payload_entropy'], 'g-', alpha=0.5, label='All Packets')
+        axes[1].scatter(anomalous_df['timestamp'], anomalous_df['payload_entropy'], color='red', marker='o', label=f'Anomalies ({len(anomalous_df)})')
+        axes[1].set_title('Payload Entropy Over Time (Anomalies Highlighted)')
+        axes[1].set_ylabel('Entropy (bits)')
+        axes[1].legend()
+
+        # 3. Inter-Arrival Time Plot
+        if 'time_delta_ms' in self.df.columns:
+            axes[2].plot(self.df['timestamp'], self.df['time_delta_ms'], 'o', markersize=2, alpha=0.5, label='All Packets')
+            axes[2].scatter(anomalous_df['timestamp'], anomalous_df['time_delta_ms'], color='red', marker='o', label=f'Anomalies ({len(anomalous_df)})')
+            axes[2].set_title('Inter-Arrival Time Over Time (Anomalies Highlighted)')
+            axes[2].set_xlabel('Timestamp')
+            axes[2].set_ylabel('Time Delta (ms)')
+            axes[2].legend()
+            
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            
+        return fig
+    # --- END NEW VISUALIZATION ---
+
     def generate_analysis_report(self, output_file: str = 'analysis_report.md'):
         
 
@@ -189,7 +234,8 @@ class ModbusAnalysisTool:
             }
         return anomalies
     
-    def export_analysis_results(self, output_dir: str = "analysis_output"):
+    # MODIFIED: Added anomalies_report parameter
+    def export_analysis_results(self, output_dir: str = "analysis_output", anomalies_report: List[Dict] = None):
         import os
         os.makedirs(output_dir,exist_ok=True)
         
@@ -197,6 +243,10 @@ class ModbusAnalysisTool:
         self.plot_traffic_overview(f"{output_dir}/traffic_verview.png")
         self.plot_entropy_analysis(f"{output_dir}/entropy_analysis.png")
         self.generate_analysis_report(f"{output_dir}/analysis_report.md")
+        
+        # NEW: Anomaly Visualization
+        if anomalies_report is not None and 'is_anomaly' in self.df.columns and self.df['is_anomaly'].sum() > 0:
+             self.plot_anomaly_detection(anomalies_report, f"{output_dir}/anomaly_detection.png") 
                
         #Export data
         self.df.to_csv(f"{output_dir}/features.csv", index = False)
@@ -226,4 +276,4 @@ class ModbusAnalysisTool:
         analyzer = ModbusAnalysisTool(feautres_df)
         analyzer.export_analysis_results(output_dir)
 
-        print(f"Quick analysis completed1 Results in {output_dir}/")   
+        print(f"Quick analysis completed1 Results in {output_dir}/")
