@@ -1,0 +1,28 @@
+# Virtual environments
+modbus-env/
+*-env/
+venv/
+env/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Large data files
+*.pcap
+*.pcapng
+attack_traffic_*.pcap
+pcap_labels_*.json
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,38 @@
+# Virtual environments
+model-env/
+*-env/
+venv/
+env/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Generated model files and artifacts
+*.joblib
+*.pkl
+*.pickle
+*.csv
+
+# Results directory - ignore everything except plots
+results/*
+!results/plots/
+!results/plots/**
+
+# Large data files
+pcap/
+*.pcap
+*.pcapng
+
+# OS files
+.DS_Store
+Thumbs.db
